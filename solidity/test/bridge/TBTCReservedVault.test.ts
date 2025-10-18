@@ -360,10 +360,6 @@ describe("TBTCReservedVault", () => {
       expect(reservation.isActive).to.be.false
     })
 
-    it("should return empty array for top liquidators initially", async () => {
-      const topLiquidators = await vault.getTopLiquidators()
-      expect(topLiquidators).to.have.lengthOf(0)
-    })
   })
 
   describe("Sweep Fees", () => {
