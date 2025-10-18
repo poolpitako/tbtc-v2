@@ -220,7 +220,7 @@ describe("TBTCReservedVault", () => {
   })
 
   describe("Fee Calculations", () => {
-    it("should calculate storage fee correctly", async () => {
+    it("should calculate storage fee correctly for 30 days", async () => {
       const btcAmount = ethers.utils.parseUnits("1", 8) // 1 BTC in satoshis
       const reservationDays = 30
 
@@ -231,10 +231,12 @@ describe("TBTCReservedVault", () => {
         .div(10000)
         .div(365)
 
-      // No multiplier for 1 BTC (at threshold)
+      // Year-based minimum: 30 days = 1 year fee (0.01 BTC)
+      const minimumFee = MIN_FEE_BTC
+
       // Check if below minimum fee
-      if (expectedFee.lt(MIN_FEE_BTC)) {
-        expectedFee = MIN_FEE_BTC
+      if (expectedFee.lt(minimumFee)) {
+        expectedFee = minimumFee
       }
 
       const actualFee = await vault.calculateStorageFee(btcAmount, reservationDays)
@@ -268,36 +270,67 @@ describe("TBTCReservedVault", () => {
       ).to.be.revertedWith("Invalid reservation period")
     })
 
-    it("should calculate fees for different periods correctly", async () => {
-      const btcAmount = ethers.utils.parseUnits("2", 8) // 2 BTC - above threshold to avoid multiplier
+    it("should calculate fees for different periods correctly with year-based steps", async () => {
+      const btcAmount = ethers.utils.parseUnits("10", 8) // 10 BTC to ensure base fee dominates
 
-      // Test various reservation periods
+      // Test various reservation periods with year-based minimum fees
       const testCases = [
-        { days: 1, description: "1 day" },
-        { days: 30, description: "30 days" },
-        { days: 90, description: "90 days" },
-        { days: 180, description: "180 days" },
-        { days: 365, description: "365 days" },
-        { days: 730, description: "730 days (2 years)" },
-        { days: 1460, description: "1460 days (4 years - max)" },
+        { days: 1, years: 1, description: "1 day (1 year fee)" },
+        { days: 30, years: 1, description: "30 days (1 year fee)" },
+        { days: 90, years: 1, description: "90 days (1 year fee)" },
+        { days: 180, years: 1, description: "180 days (1 year fee)" },
+        { days: 365, years: 1, description: "365 days (1 year fee)" },
+        { days: 366, years: 2, description: "366 days (2 year fee)" },
+        { days: 730, years: 2, description: "730 days (2 year fee)" },
+        { days: 731, years: 3, description: "731 days (3 year fee)" },
+        { days: 1095, years: 3, description: "1095 days (3 year fee)" },
+        { days: 1096, years: 4, description: "1096 days (4 year fee)" },
+        { days: 1460, years: 4, description: "1460 days (4 year fee - max)" },
       ]
 
       for (const testCase of testCases) {
         const fee = await vault.calculateStorageFee(btcAmount, testCase.days)
+
+        // Calculate base fee (0.1% per year)
         let expectedFee = btcAmount
           .mul(ANNUAL_FEE_BPS)
           .mul(testCase.days)
           .div(10000)
           .div(365)
 
-        // Ensure minimum fee
-        if (expectedFee.lt(MIN_FEE_BTC)) {
-          expectedFee = MIN_FEE_BTC
+        // Year-based minimum fee (not prorated)
+        const minimumFee = MIN_FEE_BTC.mul(testCase.years)
+
+        // Use the higher of the two
+        if (expectedFee.lt(minimumFee)) {
+          expectedFee = minimumFee
         }
 
         expect(fee).to.equal(
           expectedFee,
           `Fee calculation incorrect for ${testCase.description}`
+        )
+      }
+    })
+
+    it("should apply year-based minimum fees correctly", async () => {
+      const btcAmount = ethers.utils.parseUnits("0.5", 8) // 0.5 BTC - minimum fee will apply
+
+      // Test year boundaries
+      const testCases = [
+        { days: 365, expectedFee: MIN_FEE_BTC }, // 1 year = 0.01 BTC
+        { days: 366, expectedFee: MIN_FEE_BTC.mul(2) }, // 2 years = 0.02 BTC
+        { days: 730, expectedFee: MIN_FEE_BTC.mul(2) }, // 2 years = 0.02 BTC
+        { days: 731, expectedFee: MIN_FEE_BTC.mul(3) }, // 3 years = 0.03 BTC
+        { days: 1095, expectedFee: MIN_FEE_BTC.mul(3) }, // 3 years = 0.03 BTC
+        { days: 1096, expectedFee: MIN_FEE_BTC.mul(4) }, // 4 years = 0.04 BTC
+      ]
+
+      for (const testCase of testCases) {
+        const fee = await vault.calculateStorageFee(btcAmount, testCase.days)
+        expect(fee).to.equal(
+          testCase.expectedFee,
+          `Year-based minimum fee incorrect for ${testCase.days} days`
         )
       }
     })
