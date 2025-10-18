@@ -45,13 +45,11 @@ contract TBTCReservedVault is OwnableUpgradeable, ReentrancyGuardUpgradeable {
 
     // Fee parameters (in basis points)
     uint256 public constant ANNUAL_FEE_BPS = 10; // 0.1% per year
-    uint256 public constant LIQUIDATION_BONUS_BPS = 10; // 0.1% liquidation bonus
-    uint256 public constant SMALL_DEPOSIT_MULTIPLIER = 2; // 2x fee for small deposits
+    uint256 public constant LIQUIDATION_FEE_SHARE_BPS = 1000; // 10% of storage fee as liquidation bonus
 
     // Deposit constraints (in satoshis)
     uint256 public constant MIN_DEPOSIT_BTC = 0.1e8; // 0.1 BTC minimum
     uint256 public constant MIN_FEE_BTC = 0.01e8; // 0.01 BTC minimum fee per year
-    uint256 public constant SMALL_DEPOSIT_THRESHOLD = 1e8; // 1 BTC threshold
     uint256 public constant MAX_RESERVATION_DAYS = 1460; // 4 years maximum
 
     // Storage fee accumulator for DAO
@@ -74,13 +72,6 @@ contract TBTCReservedVault is OwnableUpgradeable, ReentrancyGuardUpgradeable {
         bool isActive;              // Whether reservation is still active
     }
 
-    /// @notice Liquidation statistics for tracking node performance
-    struct LiquidatorStats {
-        uint256 liquidationCount;
-        uint256 totalBonusEarned;
-        uint256 lastLiquidationTime;
-    }
-
     // Mapping from UTXO hash to reservation
     mapping(bytes32 => Reservation) public reservations;
 
@@ -89,13 +80,6 @@ contract TBTCReservedVault is OwnableUpgradeable, ReentrancyGuardUpgradeable {
 
     // Mapping from user to active reservation count
     mapping(address => uint256) public activeReservationCount;
-
-    // Liquidator performance tracking
-    mapping(address => LiquidatorStats) public liquidatorStats;
-
-    // Top liquidators leaderboard
-    address[] public topLiquidators;
-    uint256 public constant MAX_LEADERBOARD_SIZE = 10;
 
     // ═══════════════════════════════════════════════════════════════════════════
     // Events
@@ -247,11 +231,15 @@ contract TBTCReservedVault is OwnableUpgradeable, ReentrancyGuardUpgradeable {
         tbtcToken.burnFrom(msg.sender, reservation.tbtcMinted);
         bank.decreaseBalance(reservation.tbtcMinted);
 
-        // Process redemption through bridge
+        // Process redemption through bridge (placeholder for actual redemption logic)
         _processRedemption(reservation);
 
         // Send storage fee to DAO
         accumulatedFeesForDAO += reservation.storageFee;
+
+        // Move the BTC UTXO to general pool so it can be redeemed by DAO
+        // This is crucial - without this, the BTC would be stuck!
+        _moveToGeneralPool(reservation);
 
         // Clean up reservation
         reservation.isActive = false;
@@ -279,15 +267,16 @@ contract TBTCReservedVault is OwnableUpgradeable, ReentrancyGuardUpgradeable {
         require(reservation.isActive, "Reservation not active");
         require(block.timestamp > reservation.expiryTimestamp, "Reservation not expired");
 
-        // Calculate liquidation bonus (0.1% of BTC value)
-        liquidationBonus = _satoshiToTbtc(
-            (reservation.btcAmount * LIQUIDATION_BONUS_BPS) / 10000
-        );
+        // Calculate liquidation bonus as 10% of the storage fee paid (not BTC value)
+        // This incentivizes liquidating higher-fee reservations first
+        uint256 bonusSatoshis = (reservation.storageFee * LIQUIDATION_FEE_SHARE_BPS) / 10000;
+        liquidationBonus = _satoshiToTbtc(bonusSatoshis);
 
-        // Storage fee goes to DAO
-        accumulatedFeesForDAO += reservation.storageFee;
+        // Remaining storage fee goes to DAO (90% of storage fee)
+        uint256 feeForDAO = reservation.storageFee - bonusSatoshis;
+        accumulatedFeesForDAO += feeForDAO;
 
-        // Mint bonus to liquidator (comes from storage fee buffer)
+        // Mint bonus to liquidator (comes from storage fee)
         if (liquidationBonus > 0) {
             tbtcToken.mint(msg.sender, liquidationBonus);
             bank.increaseBalance(msg.sender, liquidationBonus);
@@ -295,9 +284,6 @@ contract TBTCReservedVault is OwnableUpgradeable, ReentrancyGuardUpgradeable {
 
         // Move UTXO to general redemption pool
         _moveToGeneralPool(reservation);
-
-        // Update liquidator stats
-        _updateLiquidatorStats(msg.sender, liquidationBonus);
 
         // Clean up reservation
         reservation.isActive = false;
@@ -385,11 +371,6 @@ contract TBTCReservedVault is OwnableUpgradeable, ReentrancyGuardUpgradeable {
         return reservations[utxoHash];
     }
 
-    /// @notice Gets the top liquidators by performance
-    /// @return liquidators Array of top performing liquidator addresses
-    function getTopLiquidators() external view returns (address[] memory) {
-        return topLiquidators;
-    }
 
     // ═══════════════════════════════════════════════════════════════════════════
     // Admin Functions
@@ -480,49 +461,6 @@ contract TBTCReservedVault is OwnableUpgradeable, ReentrancyGuardUpgradeable {
                 userHashes[i] = userHashes[userHashes.length - 1];
                 userHashes.pop();
                 break;
-            }
-        }
-    }
-
-    function _updateLiquidatorStats(address liquidator, uint256 bonus) internal {
-        LiquidatorStats storage stats = liquidatorStats[liquidator];
-        stats.liquidationCount++;
-        stats.totalBonusEarned += bonus;
-        stats.lastLiquidationTime = block.timestamp;
-
-        _updateLeaderboard(liquidator);
-    }
-
-    function _updateLeaderboard(address liquidator) internal {
-        uint256 liquidatorScore = liquidatorStats[liquidator].liquidationCount;
-
-        // Check if already in leaderboard
-        bool inLeaderboard = false;
-        uint256 position = 0;
-
-        for (uint256 i = 0; i < topLiquidators.length; i++) {
-            if (topLiquidators[i] == liquidator) {
-                inLeaderboard = true;
-                position = i;
-                break;
-            }
-        }
-
-        if (!inLeaderboard && topLiquidators.length < MAX_LEADERBOARD_SIZE) {
-            topLiquidators.push(liquidator);
-            position = topLiquidators.length - 1;
-            inLeaderboard = true;
-        }
-
-        // Bubble up if score improved
-        if (inLeaderboard) {
-            while (position > 0 &&
-                   liquidatorStats[topLiquidators[position]].liquidationCount >
-                   liquidatorStats[topLiquidators[position - 1]].liquidationCount) {
-                address temp = topLiquidators[position];
-                topLiquidators[position] = topLiquidators[position - 1];
-                topLiquidators[position - 1] = temp;
-                position--;
             }
         }
     }
