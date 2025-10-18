@@ -50,7 +50,7 @@ contract TBTCReservedVault is OwnableUpgradeable, ReentrancyGuardUpgradeable {
 
     // Deposit constraints (in satoshis)
     uint256 public constant MIN_DEPOSIT_BTC = 0.1e8; // 0.1 BTC minimum
-    uint256 public constant MIN_FEE_BTC = 0.01e8; // 0.01 BTC minimum fee
+    uint256 public constant MIN_FEE_BTC = 0.01e8; // 0.01 BTC minimum fee per year
     uint256 public constant SMALL_DEPOSIT_THRESHOLD = 1e8; // 1 BTC threshold
     uint256 public constant MAX_RESERVATION_DAYS = 1460; // 4 years maximum
 
@@ -350,14 +350,14 @@ contract TBTCReservedVault is OwnableUpgradeable, ReentrancyGuardUpgradeable {
         // Calculate base fee (0.1% per year)
         storageFee = (btcAmount * ANNUAL_FEE_BPS * reservationDays) / (10000 * 365);
 
-        // Apply 2x multiplier for small deposits
-        if (btcAmount < SMALL_DEPOSIT_THRESHOLD) {
-            storageFee = storageFee * SMALL_DEPOSIT_MULTIPLIER;
-        }
+        // Calculate minimum fee based on years (0.01 BTC per year, stepped not prorated)
+        // 1-365 days = 1 year fee, 366-730 days = 2 year fee, etc.
+        uint256 yearsRoundedUp = (reservationDays + 364) / 365;
+        uint256 minimumFee = MIN_FEE_BTC * yearsRoundedUp;
 
         // Ensure minimum fee
-        if (storageFee < MIN_FEE_BTC) {
-            storageFee = MIN_FEE_BTC;
+        if (storageFee < minimumFee) {
+            storageFee = minimumFee;
         }
 
         return storageFee;
